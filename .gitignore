@@ -1,0 +1,49 @@
+# Environment Variables
+.env
+.env.local
+.env.production
+
+# Documentation and Instructions
+SETUP.md
+database/GOOGLE_DRIVE_SETUP.md
+
+# Scripts
+scripts/get-oauth-token.js
+
+# Database - Exclude everything except schema
+database/*.sql
+!database/schema.sql
+!database/add_sharing_columns.sql
+database/*.json
+
+# Google Drive Service Account Credentials
+database/drive-config.json
+database/*-credentials.json
+*service-account*.json
+client_secret_*.json
+oauth-drive*.json
+tokens-drive*.json
+
+# Dependencies
+node_modules
+
+# Build output
+dist
+.vercel
+
+# IDE
+.vscode
+.idea
+.cursor
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Temporary files
+*.tmp
+temp/
