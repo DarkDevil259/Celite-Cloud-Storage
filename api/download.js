@@ -2,10 +2,11 @@ import { supabase } from '../lib/supabase.js'
 import { deriveKey, decryptBuffer, calculateChecksum } from '../lib/crypto.js'
 import { reassembleChunks } from '../lib/chunker.js'
 import { downloadChunkFromDrive } from '../lib/drive.js'
+import { sendJson } from '../lib/response.js'
 
 export default async function handler(req, res) {
     if (req.method !== 'GET') {
-        return res.status(405).json({ error: 'Method not allowed' })
+        return sendJson(res, 405, { error: 'Method not allowed' })
     }
 
     try {
@@ -14,14 +15,14 @@ export default async function handler(req, res) {
         // Get user from auth header
         const authHeader = req.headers.authorization
         if (!authHeader) {
-            return res.status(401).json({ error: 'Unauthorized' })
+            return sendJson(res, 401, { error: 'Unauthorized' })
         }
 
         const token = authHeader.replace('Bearer ', '')
         const { data: { user }, error: authError } = await supabase.auth.getUser(token)
 
         if (authError || !user) {
-            return res.status(401).json({ error: 'Invalid token' })
+            return sendJson(res, 401, { error: 'Invalid token' })
         }
 
         // Get file metadata
@@ -34,12 +35,12 @@ export default async function handler(req, res) {
             .single()
 
         if (fileError || !file) {
-            return res.status(404).json({ error: 'File not found' })
+            return sendJson(res, 404, { error: 'File not found' })
         }
 
         // Check if file upload is completed
         if (file.status && file.status !== 'completed') {
-            return res.status(400).json({ error: `File is not ready for download (status: ${file.status})` })
+            return sendJson(res, 400, { error: `File is not ready for download (status: ${file.status})` })
         }
 
         // Get all chunks
@@ -53,17 +54,13 @@ export default async function handler(req, res) {
             .order('chunk_index', { ascending: true })
 
         if (chunksError || !chunks || chunks.length === 0) {
-            return res.status(404).json({ error: 'File chunks not found' })
+            return sendJson(res, 404, { error: 'File chunks not found' })
         }
 
         // Prepare response for streaming
         res.setHeader('Content-Type', file.mime_type || 'application/octet-stream')
         res.setHeader('Content-Disposition', `attachment; filename="${file.name}"`)
-        // Note: Content-Length is tricky if we strip IV/Tag. 
-        // We stored 'size' in DB which is likely the Original Size? 
-        // Or Encrypted Size? 
-        // In upload.js: 'size: uploadedFile.size' (Original Size).
-        // So we can use file.size.
+        // Content-Length using the original file size stored in DB
         res.setHeader('Content-Length', file.size)
 
         const key = deriveKey(user.id)
@@ -77,6 +74,7 @@ export default async function handler(req, res) {
 
             // Extract IV, AuthTag, and Encrypted Data
             // Format: [IV(16)][Tag(16)][Data]
+            // This matches the format used in api/upload.js
             const iv = chunkBuffer.subarray(0, 16)
             const authTag = chunkBuffer.subarray(16, 32)
             const encryptedData = chunkBuffer.subarray(32)
@@ -85,7 +83,7 @@ export default async function handler(req, res) {
             const decryptedChunk = decryptBuffer(
                 encryptedData,
                 key,
-                iv.toString('hex'), // decryptBuffer expects hex string? Checking lib/crypto.js... Yes.
+                iv.toString('hex'),
                 authTag.toString('hex')
             )
 
@@ -98,7 +96,7 @@ export default async function handler(req, res) {
     } catch (error) {
         console.error('Download error:', error)
         if (!res.headersSent) {
-            return res.status(500).json({ error: error.message })
+            return sendJson(res, 500, { error: error.message })
         }
         // If headers were already sent (streaming started), we can't switch to JSON.
         // We just end the response.

@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabase.js'
 import { deriveKey, encryptBuffer, calculateChecksum } from '../lib/crypto.js'
 import { splitIntoChunks } from '../lib/chunker.js'
 import { getDriveForChunk, uploadChunkToDrive } from '../lib/drive.js'
+import { sendJson } from '../lib/response.js'
 
 export const config = {
     api: {
@@ -39,17 +40,17 @@ const parseJsonBody = async (req) => {
 
 export default async function handler(req, res) {
     if (req.method !== 'POST') {
-        return res.status(405).json({ error: 'Method not allowed' })
+        return sendJson(res, 405, { error: 'Method not allowed' })
     }
 
     try {
         // Authenticate user
         const authHeader = req.headers.authorization
-        if (!authHeader) return res.status(401).json({ error: 'Unauthorized' })
+        if (!authHeader) return sendJson(res, 401, { error: 'Unauthorized' })
 
         const token = authHeader.replace('Bearer ', '')
         const { data: { user }, error: authError } = await supabase.auth.getUser(token)
-        if (authError || !user) return res.status(401).json({ error: 'Invalid token' })
+        if (authError || !user) return sendJson(res, 401, { error: 'Invalid token' })
 
         // ---------------------------------------------------------
         // Action Dispatcher
@@ -63,12 +64,12 @@ export default async function handler(req, res) {
         } else if (action === 'finish') {
             return handleFinish(req, res, user)
         } else {
-            return res.status(400).json({ error: 'Invalid action. Use init, chunk, or finish.' })
+            return sendJson(res, 400, { error: 'Invalid action. Use init, chunk, or finish.' })
         }
 
     } catch (error) {
         console.error('Upload API error:', error)
-        return res.status(500).json({ error: error.message })
+        return sendJson(res, 500, { error: error.message })
     }
 }
 
@@ -78,14 +79,6 @@ export default async function handler(req, res) {
 async function handleInit(req, res, user) {
     const body = await parseJsonBody(req)
     const { name, size, mimeType } = body
-
-    // Note: encryption_iv and auth_tag will be null initially
-    // We will update them after uploading the FIRST chunk (or all chunks if needed)
-    // Actually, we generate a unique IV for EACH chunk now? 
-    // Or one IV for the file? 
-    // Logic change: We encrypt each chunk independently. 
-    // So 'encryption_iv' on the file record might act as a master IV or be unused.
-    // Let's rely on chunk-level encryption for simplicity in this flow.
 
     const { data: file, error } = await supabase
         .from('files')
@@ -103,7 +96,7 @@ async function handleInit(req, res, user) {
 
     if (error) throw new Error(error.message)
 
-    return res.status(200).json({ fileId: file.id })
+    return sendJson(res, 200, { fileId: file.id })
 }
 
 // ---------------------------------------------------------
@@ -118,7 +111,7 @@ async function handleChunk(req, res, user) {
     const uploadedFile = files.chunk?.[0]
 
     if (!fileId || isNaN(chunkIndex) || !uploadedFile) {
-        return res.status(400).json({ error: 'Missing fileId, chunkIndex or chunk data' })
+        return sendJson(res, 400, { error: 'Missing fileId, chunkIndex or chunk data' })
     }
 
     // Read chunk data
@@ -132,7 +125,7 @@ async function handleChunk(req, res, user) {
         .single()
 
     if (!fileRecord || fileRecord.user_id !== user.id) {
-        return res.status(403).json({ error: 'Access denied' })
+        return sendJson(res, 403, { error: 'Access denied' })
     }
 
     // Encrypt chunk
@@ -140,18 +133,26 @@ async function handleChunk(req, res, user) {
     const key = deriveKey(user.id)
     const { encrypted, iv, authTag } = encryptBuffer(chunkBuffer, key)
 
-    // Upload to Google Drive
+    // Combine: [IV 16][Tag 16][Encrypted]
+    // This allows us to store the unique IV/Tag for this chunk WITH the chunk data
+    const combinedBuffer = Buffer.concat([
+        Buffer.from(iv, 'hex'),
+        Buffer.from(authTag, 'hex'),
+        encrypted
+    ])
+
+    // Upload to Google Drive (Single Upload)
     const driveAccount = await getDriveForChunk(chunkIndex)
     const driveFileName = `${fileId}_chunk_${chunkIndex}`
 
     const driveFileId = await uploadChunkToDrive(
         driveAccount,
-        encrypted,
+        combinedBuffer,
         driveFileName
     )
 
     // Save chunk metadata
-    const checksum = calculateChecksum(encrypted)
+    const checksum = calculateChecksum(encrypted) // Checksum of the encrypted payload
 
     const { error: chunkError } = await supabase
         .from('chunks')
@@ -160,67 +161,16 @@ async function handleChunk(req, res, user) {
             chunk_index: chunkIndex,
             drive_account_id: driveAccount.id,
             drive_file_id: driveFileId,
-            size: encrypted.length,
-            checksum: checksum,
-            // Store IV/AuthTag per chunk? 
-            // The current schema might not have columns for per-chunk IV. 
-            // If schema lacks per-chunk IV, we must store it in the file record? 
-            // BUT we have multiple chunks!
-            // Solution: Prepend IV and AuthTag to the encrypted data itself!
-            // The 'encryptBuffer' returns them separately.
-            // Let's modify the upload to store [IV + AuthTag + EncryptedData] in Drive.
+            size: combinedBuffer.length, // Store size of the actual file on Drive
+            checksum: checksum
         })
-
-    // WAIT! If we change storage format (prepending IV), we break download logic.
-    // Does 'encryptBuffer' return a format we can just concat?
-    // 'encryptBuffer' returns object. 
-    // We should store IV/Tag in the DB if possible, or prepended to file.
-    // IMPORTANT: The current 'chunks' table schema likely doesn't have 'iv' column.
-    // Let's check schema. If not, we MUST prepend to data.
-    // Prepending is safer for backward compatibility if we add columns later.
-    // Let's PREPEND IV (16 bytes) and AuthTag (16 bytes) to the encrypted buffer.
-
-    // However, 'deriveKey' uses user.id. 
-    // 'encryptBuffer' uses random IV.
-
-    // Let's assume for now we perform the update to 'chunks' table later if needed.
-    // But wait, the previous code stored IV in 'files' table.
-    // That implies ONE IV for the whole file. 
-    // If we chunk locally and encrypt locally, we have creating multiple IVs.
-    // We must enable storing IV per chunk OR use the same IV for all chunks (bad practice but easier).
-    // BETTER: Use `encryption_iv` from file record for ALL chunks? 
-    // No, we need to pass it to `handleChunk`.
-
-    // REVISED PLAN:
-    // To avoid schema changes:
-    // We will append IV and AuthTag to the chunk data uploaded to Drive.
-    // When downloading, we read first 32 bytes to get IV/Tag.
-    // This requires updating `download.js` too.
-
-    // Actually, looking at `api/upload.js` original code:
-    // It derived ONE key, ONE IV, encrypted the WHOLE file, then split it.
-    // So the chunks were just raw slices of the encrypted stream.
-    // Now we are encrypting EACH chunk separately.
-    // This means each chunk is a self-contained encrypted blob.
-    // We MUST store the IV/Tag for each chunk.
-    // Since we can't change DB schema easily right now, we will EMBED them in the file.
-    // Format on Drive: [IV 16b][Tag 16b][Encrypted Data]
-
-    const combinedBuffer = Buffer.concat([
-        Buffer.from(iv, 'hex'),
-        Buffer.from(authTag, 'hex'),
-        encrypted
-    ])
-
-    // Re-upload with combined buffer
-    await uploadChunkToDrive(driveAccount, combinedBuffer, driveFileName)
 
     // Clean up temp file
     await fs.unlink(uploadedFile.filepath)
 
     if (chunkError) throw chunkError
 
-    return res.status(200).json({ success: true, chunkIndex })
+    return sendJson(res, 200, { success: true, chunkIndex })
 }
 
 // ---------------------------------------------------------
@@ -238,5 +188,5 @@ async function handleFinish(req, res, user) {
 
     if (error) throw error
 
-    return res.status(200).json({ success: true })
+    return sendJson(res, 200, { success: true })
 }
