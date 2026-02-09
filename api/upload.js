@@ -9,48 +9,66 @@ export const config = {
     api: {
         bodyParser: false
     }
-}
+
+// Helper to manually parse JSON body when bodyParser is false
+const parseJsonBody = async (req) => {
+        return new Promise((resolve, reject) => {
+            let data = ''
+            req.on('data', chunk => {
+                data += chunk
+            })
+            req.on('end', () => {
+                try {
+                    resolve(data ? JSON.parse(data) : {})
+                } catch (e) {
+                    reject(new Error('Invalid JSON body'))
+                }
+            })
+            req.on('error', (err) => reject(err))
+        })
+    }
 
 export default async function handler(req, res) {
-    if (req.method !== 'POST') {
-        return res.status(405).json({ error: 'Method not allowed' })
+        if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' })
+}
+
+try {
+    // Authenticate user
+    const authHeader = req.headers.authorization
+    if (!authHeader) return res.status(401).json({ error: 'Unauthorized' })
+
+    const token = authHeader.replace('Bearer ', '')
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
+    if (authError || !user) return res.status(401).json({ error: 'Invalid token' })
+
+    // ---------------------------------------------------------
+    // Action Dispatcher
+    // ---------------------------------------------------------
+    const { action } = req.query
+
+    if (action === 'init') {
+        return handleInit(req, res, user)
+    } else if (action === 'chunk') {
+        return handleChunk(req, res, user)
+    } else if (action === 'finish') {
+        return handleFinish(req, res, user)
+    } else {
+        return res.status(400).json({ error: 'Invalid action. Use init, chunk, or finish.' })
     }
 
-    try {
-        // Authenticate user
-        const authHeader = req.headers.authorization
-        if (!authHeader) return res.status(401).json({ error: 'Unauthorized' })
-
-        const token = authHeader.replace('Bearer ', '')
-        const { data: { user }, error: authError } = await supabase.auth.getUser(token)
-        if (authError || !user) return res.status(401).json({ error: 'Invalid token' })
-
-        // ---------------------------------------------------------
-        // Action Dispatcher
-        // ---------------------------------------------------------
-        const { action } = req.query
-
-        if (action === 'init') {
-            return handleInit(req, res, user)
-        } else if (action === 'chunk') {
-            return handleChunk(req, res, user)
-        } else if (action === 'finish') {
-            return handleFinish(req, res, user)
-        } else {
-            return res.status(400).json({ error: 'Invalid action. Use init, chunk, or finish.' })
-        }
-
-    } catch (error) {
-        console.error('Upload API error:', error)
-        return res.status(500).json({ error: error.message })
-    }
+} catch (error) {
+    console.error('Upload API error:', error)
+    return res.status(500).json({ error: error.message })
+}
 }
 
 // ---------------------------------------------------------
 // 1. INIT - Create file record
 // ---------------------------------------------------------
 async function handleInit(req, res, user) {
-    const { name, size, mimeType } = req.body
+    const body = await parseJsonBody(req)
+    const { name, size, mimeType } = body
 
     // Note: encryption_iv and auth_tag will be null initially
     // We will update them after uploading the FIRST chunk (or all chunks if needed)
@@ -200,7 +218,8 @@ async function handleChunk(req, res, user) {
 // 3. FINISH - Finalize upload
 // ---------------------------------------------------------
 async function handleFinish(req, res, user) {
-    const { fileId } = req.body
+    const body = await parseJsonBody(req)
+    const { fileId } = body
 
     const { error } = await supabase
         .from('files')
