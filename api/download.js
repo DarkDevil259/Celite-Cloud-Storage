@@ -56,47 +56,51 @@ export default async function handler(req, res) {
             return res.status(404).json({ error: 'File chunks not found' })
         }
 
-        // Download and verify all chunks
-        const downloadedChunks = []
+        // Prepare response for streaming
+        res.setHeader('Content-Type', file.mime_type || 'application/octet-stream')
+        res.setHeader('Content-Disposition', `attachment; filename="${file.name}"`)
+        // Note: Content-Length is tricky if we strip IV/Tag. 
+        // We stored 'size' in DB which is likely the Original Size? 
+        // Or Encrypted Size? 
+        // In upload.js: 'size: uploadedFile.size' (Original Size).
+        // So we can use file.size.
+        res.setHeader('Content-Length', file.size)
+
+        const key = deriveKey(user.id)
+
+        // Stream chunks sequentially
         for (const chunk of chunks) {
-            const chunkData = await downloadChunkFromDrive(
+            const chunkBuffer = await downloadChunkFromDrive(
                 chunk.drive_account,
                 chunk.drive_file_id
             )
 
-            // Verify checksum
-            const checksum = calculateChecksum(chunkData)
-            if (checksum !== chunk.checksum) {
-                throw new Error(`Chunk ${chunk.chunk_index} checksum mismatch`)
-            }
+            // Extract IV, AuthTag, and Encrypted Data
+            // Format: [IV(16)][Tag(16)][Data]
+            const iv = chunkBuffer.subarray(0, 16)
+            const authTag = chunkBuffer.subarray(16, 32)
+            const encryptedData = chunkBuffer.subarray(32)
 
-            downloadedChunks.push({
-                index: chunk.chunk_index,
-                data: chunkData
-            })
+            // Decrypt chunk
+            const decryptedChunk = decryptBuffer(
+                encryptedData,
+                key,
+                iv.toString('hex'), // decryptBuffer expects hex string? Checking lib/crypto.js... Yes.
+                authTag.toString('hex')
+            )
+
+            // Write to response stream
+            res.write(decryptedChunk)
         }
 
-        // Reassemble chunks
-        const encryptedFile = reassembleChunks(downloadedChunks)
-
-        // Decrypt file
-        const key = deriveKey(user.id)
-        const decryptedFile = decryptBuffer(
-            encryptedFile,
-            key,
-            file.encryption_iv,
-            file.encryption_auth_tag
-        )
-
-        // Send file to user
-        res.setHeader('Content-Type', file.mime_type || 'application/octet-stream')
-        res.setHeader('Content-Disposition', `attachment; filename="${file.name}"`)
-        res.setHeader('Content-Length', decryptedFile.length)
-
-        return res.status(200).send(decryptedFile)
+        res.end()
 
     } catch (error) {
         console.error('Download error:', error)
-        return res.status(500).json({ error: error.message })
+        // If headers sent, we can't send JSON error. But we can end stream.
+        if (!res.headersSent) {
+            return res.status(500).json({ error: error.message })
+        }
+        res.end()
     }
 }
