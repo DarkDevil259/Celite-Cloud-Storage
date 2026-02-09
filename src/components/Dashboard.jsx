@@ -16,6 +16,8 @@ function Dashboard({ user, onLogout }) {
     const [storage, setStorage] = useState({ usedGB: '0.00', totalGB: '15', usedBytes: 0, totalBytes: 0, driveCount: 0, drives: [] })
     const [showStorageDetails, setShowStorageDetails] = useState(false)
     const fileInputRef = useRef(null)
+    const uploadControllerRef = useRef(null)
+    const downloadControllerRef = useRef(null)
 
     // Fetch storage usage
     const fetchStorage = async () => {
@@ -89,7 +91,7 @@ function Dashboard({ user, onLogout }) {
             setUploading(true)
             setUploadProgress({ percentage: 0, speed: 0, timeRemaining: 0, fileName: file.name, processing: false })
 
-            await uploadFile(file, (progress) => {
+            const controller = uploadFile(file, (progress) => {
                 // When upload reaches 100%, show processing state
                 const isProcessing = progress.percentage >= 100
                 setUploadProgress({
@@ -101,16 +103,24 @@ function Dashboard({ user, onLogout }) {
                 })
             })
 
+            uploadControllerRef.current = controller
+
+            await controller.promise
+
             setUploadProgress(null)
+            uploadControllerRef.current = null
             alert('File uploaded successfully!')
             await fetchFiles()
             await fetchStorage()
         } catch (error) {
             console.error('Upload failed:', error)
-            alert(`Upload failed: ${error.message}`)
+            if (error.message !== 'Upload cancelled') {
+                alert(`Upload failed: ${error.message}`)
+            }
         } finally {
             setUploading(false)
             setUploadProgress(null)
+            uploadControllerRef.current = null
             e.target.value = '' // Reset input
         }
     }
@@ -126,6 +136,20 @@ function Dashboard({ user, onLogout }) {
         if (seconds < 60) return `${Math.round(seconds)}s`
         if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`
         return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
+    }
+
+    const handleCancelUpload = () => {
+        if (uploadControllerRef.current) {
+            uploadControllerRef.current.abort()
+            uploadControllerRef.current = null
+        }
+    }
+
+    const handleCancelDownload = () => {
+        if (downloadControllerRef.current) {
+            downloadControllerRef.current.abort()
+            downloadControllerRef.current = null
+        }
     }
 
 
@@ -283,7 +307,7 @@ function Dashboard({ user, onLogout }) {
                 preparing: true
             })
 
-            await downloadFile(file.id, file.name, (progress) => {
+            const controller = downloadFile(file.id, file.name, (progress) => {
                 setDownloading({
                     fileId: file.id,
                     fileName: file.name,
@@ -294,11 +318,19 @@ function Dashboard({ user, onLogout }) {
                 })
             })
 
+            downloadControllerRef.current = controller
+
+            await controller.promise
+
             setDownloading(null)
+            downloadControllerRef.current = null
         } catch (error) {
             console.error('Download failed:', error)
-            alert(`Download failed: ${error.message}`)
+            if (error.message !== 'Download cancelled') {
+                alert(`Download failed: ${error.message}`)
+            }
             setDownloading(null)
+            downloadControllerRef.current = null
         }
     }
 
@@ -376,6 +408,15 @@ function Dashboard({ user, onLogout }) {
                                 ? '...'
                                 : `${uploadProgress?.percentage || downloading?.percentage || 0}%`}
                         </span>
+                        <button
+                            className="progress-toast-cancel"
+                            onClick={uploadProgress ? handleCancelUpload : handleCancelDownload}
+                            title="Cancel"
+                        >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                                <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                            </svg>
+                        </button>
                     </div>
                     <div className={`progress-toast-bar ${(uploadProgress?.processing || downloading?.preparing) ? 'indeterminate' : ''}`}>
                         <div

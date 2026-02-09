@@ -500,6 +500,27 @@
     font-weight: 700;
     font-size: 1rem;
     color: var(--accent-primary);
+    margin-right: 8px;
+}
+
+.progress-toast-cancel {
+    background: transparent;
+    border: none;
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+}
+
+.progress-toast-cancel:hover {
+    background: rgba(239, 68, 68, 0.2);
+    color: #ef4444;
 }
 
 .progress-toast-bar {

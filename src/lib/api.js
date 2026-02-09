@@ -19,66 +19,161 @@ export const getAuthToken = async () => {
 const API_BASE = '/api'
 
 // Upload file with progress tracking
-export const uploadFile = async (file, onProgress) => {
-    const token = await getAuthToken()
-    if (!token) throw new Error('Not authenticated')
+export const uploadFile = (file, onProgress) => {
+    let currentXhr = null
+    let cancelled = false
 
-    const CHUNK_SIZE = 4 * 1024 * 1024 // 4MB
-    const totalSize = file.size
-    const totalChunks = Math.ceil(totalSize / CHUNK_SIZE)
+    const promise = (async () => {
+        const token = await getAuthToken()
+        if (!token) throw new Error('Not authenticated')
 
-    // 1. INIT
-    const initResponse = await fetch(`${API_BASE}/upload?action=init`, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            name: file.name,
-            size: file.size,
-            mimeType: file.type
+        const CHUNK_SIZE = 4 * 1024 * 1024 // 4MB
+        const totalSize = file.size
+        const totalChunks = Math.ceil(totalSize / CHUNK_SIZE)
+
+        // 1. INIT
+        const initResponse = await fetch(`${API_BASE}/upload?action=init`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                name: file.name,
+                size: file.size,
+                mimeType: file.type
+            })
         })
-    })
 
-    if (!initResponse.ok) {
-        const err = await initResponse.json()
-        throw new Error(err.error || 'Upload initialization failed')
+        if (!initResponse.ok) {
+            const err = await initResponse.json()
+            throw new Error(err.error || 'Upload initialization failed')
+        }
+
+        const { fileId } = await initResponse.json()
+        let loadedGlobal = 0
+        const startTime = Date.now()
+
+        // 2. CHUNK LOOP
+        for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+            if (cancelled) throw new Error('Upload cancelled')
+
+            const start = chunkIndex * CHUNK_SIZE
+            const end = Math.min(start + CHUNK_SIZE, totalSize)
+            const chunkBlob = file.slice(start, end)
+
+            const formData = new FormData()
+            formData.append('fileId', fileId)
+            formData.append('chunkIndex', chunkIndex.toString())
+            formData.append('chunk', chunkBlob, 'chunk.bin')
+
+            await new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest()
+                currentXhr = xhr
+
+                xhr.upload.addEventListener('progress', (event) => {
+                    if (event.lengthComputable && onProgress) {
+                        const chunkLoaded = event.loaded
+                        const currentLoaded = loadedGlobal + chunkLoaded
+
+                        const currentTime = Date.now()
+                        const elapsedTime = (currentTime - startTime) / 1000
+                        const avgSpeed = elapsedTime > 0 ? currentLoaded / elapsedTime : 0
+                        const remaining = totalSize - currentLoaded
+                        const timeRemaining = avgSpeed > 0 ? remaining / avgSpeed : 0
+
+                        onProgress({
+                            loaded: currentLoaded,
+                            total: totalSize,
+                            percentage: Math.round((currentLoaded / totalSize) * 100),
+                            speed: avgSpeed,
+                            timeRemaining: timeRemaining
+                        })
+                    }
+                })
+
+                xhr.addEventListener('load', () => {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        currentXhr = null
+                        resolve()
+                    } else {
+                        reject(new Error('Chunk upload failed'))
+                    }
+                })
+
+                xhr.addEventListener('error', () => reject(new Error('Network error during upload')))
+                xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')))
+
+                xhr.open('POST', `${API_BASE}/upload?action=chunk`)
+                xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+                xhr.send(formData)
+            })
+
+            loadedGlobal += chunkBlob.size
+        }
+
+        // 3. FINISH
+        if (cancelled) throw new Error('Upload cancelled')
+
+        const finishResponse = await fetch(`${API_BASE}/upload?action=finish`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ fileId })
+        })
+
+        if (!finishResponse.ok) {
+            throw new Error('Failed to finalize upload')
+        }
+
+        return finishResponse.json()
+    })()
+
+    return {
+        promise,
+        abort: () => {
+            cancelled = true
+            if (currentXhr) {
+                currentXhr.abort()
+            }
+        }
     }
+}
 
-    const { fileId } = await initResponse.json()
-    let loadedGlobal = 0
-    const startTime = Date.now()
+// Download file with progress tracking
+export const downloadFile = (fileId, fileName, onProgress) => {
+    const token = getAuthToken()
 
-    // 2. CHUNK LOOP
-    for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-        const start = chunkIndex * CHUNK_SIZE
-        const end = Math.min(start + CHUNK_SIZE, totalSize)
-        const chunkBlob = file.slice(start, end)
+    let xhr = null
 
-        const formData = new FormData()
-        formData.append('fileId', fileId)
-        formData.append('chunkIndex', chunkIndex.toString())
-        formData.append('chunk', chunkBlob, 'chunk.bin')
+    const promise = (async () => {
+        const authToken = await token
+        if (!authToken) throw new Error('Not authenticated')
 
-        await new Promise((resolve, reject) => {
-            const xhr = new XMLHttpRequest()
+        return new Promise((resolve, reject) => {
+            xhr = new XMLHttpRequest()
+            const startTime = Date.now()
 
-            xhr.upload.addEventListener('progress', (event) => {
+            xhr.responseType = 'blob'
+
+            xhr.addEventListener('progress', (event) => {
                 if (event.lengthComputable && onProgress) {
-                    const chunkLoaded = event.loaded
-                    const currentLoaded = loadedGlobal + chunkLoaded
-
                     const currentTime = Date.now()
-                    const elapsedTime = (currentTime - startTime) / 1000
-                    const avgSpeed = elapsedTime > 0 ? currentLoaded / elapsedTime : 0
-                    const remaining = totalSize - currentLoaded
+                    const elapsedTime = (currentTime - startTime) / 1000 // total elapsed seconds
+
+                    // Calculate average speed (bytes per second) from start
+                    const avgSpeed = elapsedTime > 0 ? event.loaded / elapsedTime : 0
+
+                    // Calculate time remaining based on average speed
+                    const remaining = event.total - event.loaded
                     const timeRemaining = avgSpeed > 0 ? remaining / avgSpeed : 0
 
                     onProgress({
-                        loaded: currentLoaded,
-                        total: totalSize,
-                        percentage: Math.round((currentLoaded / totalSize) * 100),
+                        loaded: event.loaded,
+                        total: event.total,
+                        percentage: Math.round((event.loaded / event.total) * 100),
                         speed: avgSpeed,
                         timeRemaining: timeRemaining
                     })
@@ -87,99 +182,38 @@ export const uploadFile = async (file, onProgress) => {
 
             xhr.addEventListener('load', () => {
                 if (xhr.status >= 200 && xhr.status < 300) {
+                    const blob = xhr.response
+                    const url = window.URL.createObjectURL(blob)
+                    const a = document.createElement('a')
+                    a.href = url
+                    a.download = fileName
+                    document.body.appendChild(a)
+                    a.click()
+                    window.URL.revokeObjectURL(url)
+                    document.body.removeChild(a)
                     resolve()
                 } else {
-                    reject(new Error('Chunk upload failed'))
+                    reject(new Error('Download failed'))
                 }
             })
 
-            xhr.addEventListener('error', () => reject(new Error('Network error during upload')))
-            xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')))
+            xhr.addEventListener('error', () => reject(new Error('Download failed - network error')))
+            xhr.addEventListener('abort', () => reject(new Error('Download cancelled')))
 
-            xhr.open('POST', `${API_BASE}/upload?action=chunk`)
-            xhr.setRequestHeader('Authorization', `Bearer ${token}`)
-            xhr.send(formData)
+            xhr.open('GET', `${API_BASE}/download?fileId=${fileId}`)
+            xhr.setRequestHeader('Authorization', `Bearer ${authToken}`)
+            xhr.send()
         })
+    })()
 
-        loadedGlobal += chunkBlob.size
-    }
-
-    // 3. FINISH
-    const finishResponse = await fetch(`${API_BASE}/upload?action=finish`, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ fileId })
-    })
-
-    if (!finishResponse.ok) {
-        throw new Error('Failed to finalize upload')
-    }
-
-    return finishResponse.json()
-}
-
-// Download file with progress tracking
-export const downloadFile = async (fileId, fileName, onProgress) => {
-    const token = await getAuthToken()
-    if (!token) throw new Error('Not authenticated')
-
-    return new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest()
-        const startTime = Date.now()
-        let lastLoaded = 0
-        let lastTime = startTime
-
-        xhr.responseType = 'blob'
-
-        xhr.addEventListener('progress', (event) => {
-            if (event.lengthComputable && onProgress) {
-                const currentTime = Date.now()
-                const elapsedTime = (currentTime - startTime) / 1000 // total elapsed seconds
-
-                // Calculate average speed (bytes per second) from start
-                const avgSpeed = elapsedTime > 0 ? event.loaded / elapsedTime : 0
-
-                // Calculate time remaining based on average speed
-                const remaining = event.total - event.loaded
-                const timeRemaining = avgSpeed > 0 ? remaining / avgSpeed : 0
-
-                onProgress({
-                    loaded: event.loaded,
-                    total: event.total,
-                    percentage: Math.round((event.loaded / event.total) * 100),
-                    speed: avgSpeed,
-                    timeRemaining: timeRemaining
-                })
+    return {
+        promise,
+        abort: () => {
+            if (xhr) {
+                xhr.abort()
             }
-        })
-
-        xhr.addEventListener('load', () => {
-            if (xhr.status >= 200 && xhr.status < 300) {
-                const blob = xhr.response
-                const url = window.URL.createObjectURL(blob)
-                const a = document.createElement('a')
-                a.href = url
-                a.download = fileName
-                document.body.appendChild(a)
-                a.click()
-                window.URL.revokeObjectURL(url)
-                document.body.removeChild(a)
-                resolve()
-            } else {
-                reject(new Error('Download failed'))
-            }
-        })
-
-        xhr.addEventListener('error', () => reject(new Error('Download failed - network error')))
-        xhr.addEventListener('abort', () => reject(new Error('Download cancelled')))
-
-        xhr.open('GET', `${API_BASE}/download?fileId=${fileId}`)
-        xhr.setRequestHeader('Authorization', `Bearer ${token}`)
-        xhr.send()
-    })
+        }
+    }
 }
 
 // Get storage usage
