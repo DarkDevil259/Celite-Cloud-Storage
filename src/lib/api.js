@@ -46,8 +46,16 @@ export const uploadFile = (file, onProgress) => {
         })
 
         if (!initResponse.ok) {
-            const err = await initResponse.json()
-            throw new Error(err.error || 'Upload initialization failed')
+            let errorMessage = 'Upload initialization failed'
+            try {
+                const err = await initResponse.json()
+                errorMessage = err.error || errorMessage
+            } catch (e) {
+                // Response is not JSON, try to get text
+                const text = await initResponse.text()
+                errorMessage = text || `Server error (${initResponse.status})`
+            }
+            throw new Error(errorMessage)
         }
 
         const { fileId } = await initResponse.json()
