@@ -15,12 +15,13 @@ export const config = {
 
 // Helper to manually parse JSON body when bodyParser is false
 const parseJsonBody = async (req) => {
-    // If body is already parsed by middleware (e.g. express.json()), use it
-    if (req.body && typeof req.body === 'object' && Object.keys(req.body).length > 0) {
+    // If body is already parsed by Express middleware (express.json()), use it
+    if (req.body && typeof req.body === 'object') {
+        // Even if it's an empty object, return it - don't try to re-read the stream
         return req.body
     }
 
-    // Otherwise, parse manually from stream
+    // Otherwise, parse manually from stream (for Vercel serverless)
     return new Promise((resolve, reject) => {
         let data = ''
         req.on('data', chunk => {
@@ -78,6 +79,7 @@ export default async function handler(req, res) {
 // 1. INIT - Create file record
 // ---------------------------------------------------------
 async function handleInit(req, res, user) {
+    console.log('Upload init started for user:', user.id)
     const body = await parseJsonBody(req)
     const { name, size, mimeType } = body
 
@@ -98,13 +100,17 @@ async function handleInit(req, res, user) {
             is_deleted: false,
             is_starred: false,
             encryption_iv: iv,
-            auth_tag: authTag
+            encryption_auth_tag: authTag
         })
         .select()
         .single()
 
-    if (error) throw new Error(error.message)
+    if (error) {
+        console.error('Failed to create file record:', error)
+        throw new Error(error.message)
+    }
 
+    console.log('File record created with ID:', file.id)
     return sendJson(res, 200, { fileId: file.id })
 }
 
