@@ -13,6 +13,12 @@ export const config = {
 
 // Helper to manually parse JSON body when bodyParser is false
 const parseJsonBody = async (req) => {
+    // If body is already parsed by middleware (e.g. express.json()), use it
+    if (req.body && typeof req.body === 'object' && Object.keys(req.body).length > 0) {
+        return req.body
+    }
+
+    // Otherwise, parse manually from stream
     return new Promise((resolve, reject) => {
         let data = ''
         req.on('data', chunk => {
@@ -22,6 +28,8 @@ const parseJsonBody = async (req) => {
             try {
                 resolve(data ? JSON.parse(data) : {})
             } catch (e) {
+                // If body was empty, return empty object
+                if (!data) return resolve({})
                 reject(new Error('Invalid JSON body'))
             }
         })

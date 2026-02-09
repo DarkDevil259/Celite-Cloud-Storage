@@ -97,10 +97,11 @@ export default async function handler(req, res) {
 
     } catch (error) {
         console.error('Download error:', error)
-        // If headers sent, we can't send JSON error. But we can end stream.
         if (!res.headersSent) {
             return res.status(500).json({ error: error.message })
         }
+        // If headers were already sent (streaming started), we can't switch to JSON.
+        // We just end the response.
         res.end()
     }
 }
