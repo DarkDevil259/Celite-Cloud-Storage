@@ -1,6 +1,7 @@
 import formidable from 'formidable'
 import fs from 'fs/promises'
 import { supabase } from '../lib/supabase.js'
+import crypto from 'crypto'
 import { deriveKey, encryptBuffer, calculateChecksum } from '../lib/crypto.js'
 import { splitIntoChunks } from '../lib/chunker.js'
 import { getDriveForChunk, uploadChunkToDrive } from '../lib/drive.js'
@@ -80,6 +81,12 @@ async function handleInit(req, res, user) {
     const body = await parseJsonBody(req)
     const { name, size, mimeType } = body
 
+    // Generate dummy/master IV and AuthTag to satisfy DB constraints.
+    // Since we encrypt per-chunk, these might not be used for decryption, 
+    // but the DB requires them to be NOT NULL.
+    const iv = crypto.randomBytes(16).toString('hex')
+    const authTag = crypto.randomBytes(16).toString('hex') // Placeholder
+
     const { data: file, error } = await supabase
         .from('files')
         .insert({
@@ -89,7 +96,9 @@ async function handleInit(req, res, user) {
             mime_type: mimeType,
             status: 'uploading',
             is_deleted: false,
-            is_starred: false
+            is_starred: false,
+            encryption_iv: iv,
+            auth_tag: authTag
         })
         .select()
         .single()
